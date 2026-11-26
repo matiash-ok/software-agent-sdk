@@ -487,6 +487,18 @@ class Config(BaseModel):
             "OH_CONVERSATION_CONTAINER_ISOLATIONS as a JSON list."
         ),
     )
+    conversation_local_agent_profiles: list[str] | None = Field(
+        default=None,
+        description=(
+            "Names of the agent profiles a conversation on this host (the "
+            "`local` runtime) may start from. None allows any agent. Set it on a "
+            "server that also runs Docker conversations to keep general agents "
+            "off the host: with a list, a local start must name one of these "
+            "profiles in `agent_profile_id`, and a request that carries its own "
+            "agent is refused. It does not apply to Docker conversations. "
+            "Configure with OH_CONVERSATION_LOCAL_AGENT_PROFILES as a JSON list."
+        ),
+    )
     conversation_container_isolation: str = Field(
         default=STANDARD_CONTAINER_ISOLATION,
         description=(

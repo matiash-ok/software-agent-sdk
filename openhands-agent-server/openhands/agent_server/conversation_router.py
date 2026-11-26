@@ -18,13 +18,16 @@ from pydantic import TypeAdapter, ValidationError
 from openhands.agent_server._secrets_exposure import (
     decrypt_incoming_llm_secrets,
 )
+from openhands.agent_server.config import Config
 from openhands.agent_server.conversation_registry import ConversationRegistry
 from openhands.agent_server.conversation_service import ConversationService
 from openhands.agent_server.dependencies import (
     get_cipher,
+    get_config,
     get_conversation_registry,
     get_conversation_service,
     get_llm_profile_store,
+    get_stores,
 )
 from openhands.agent_server.errors import error_responses
 from openhands.agent_server.exceptions import (
@@ -60,7 +63,7 @@ from openhands.agent_server.models import (
     UpdateSecretsRequest,
     trim_conversation_response_skills,
 )
-from openhands.agent_server.persistence import run_store
+from openhands.agent_server.persistence import ServerStores, run_store
 from openhands.sdk import LLM
 from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.conversation.types import (
@@ -333,6 +336,37 @@ async def batch_get_conversations(
 # Write Methods
 
 
+async def _require_local_agent_profile(
+    request: StartConversationRequest,
+    config: Config,
+    stores: ServerStores,
+    conversation_service: ConversationService,
+) -> None:
+    """Refuse a new host conversation whose agent profile the server does not
+    allow on the host (``conversation_local_agent_profiles``)."""
+    allowed = config.conversation_local_agent_profiles
+    if allowed is None:
+        return
+    # An existing conversation was admitted when it was created.
+    if (
+        request.conversation_id is not None
+        and await conversation_service.get_conversation(request.conversation_id)
+        is not None
+    ):
+        return
+    name = (
+        await run_store(stores.agent_profiles.name_for_id, request.agent_profile_id)
+        if request.agent_profile_id is not None
+        else None
+    )
+    if name not in allowed:
+        raise Unprocessable(
+            "This server runs only these agent profiles on the host: "
+            f"{', '.join(allowed) or 'none'}. Start this conversation in a "
+            "container instead."
+        )
+
+
 @conversation_router.post(
     "",
     responses=error_responses(
@@ -358,10 +392,13 @@ async def start_conversation(
         str | None, Header(alias="X-OpenHands-Observability-Parent-Span-Context")
     ] = None,
     conversation_service: ConversationService = Depends(get_conversation_service),
+    config: Config = Depends(get_config),
+    stores: ServerStores = Depends(get_stores),
 ) -> ConversationInfo:
     """Start a conversation in the local environment."""
     if request.conversation_runtime not in (None, "local"):
         raise Unprocessable("This server only runs local conversations")
+    await _require_local_agent_profile(request, config, stores, conversation_service)
     await _refuse_project_member(conversation_service, request.tags)
     request = _request_with_observability_headers(
         request,

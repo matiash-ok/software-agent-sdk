@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -13,7 +14,7 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import SecretStr
 
-from openhands.agent_server.config import Config
+from openhands.agent_server.config import Config, load_config
 from openhands.agent_server.conversation_service import ConversationService
 from openhands.agent_server.docker_runtime.registry import (
     ConversationContainer,
@@ -1319,3 +1320,139 @@ def test_container_options_override_the_host_limits(
         command.index("--cpus") : command.index("--cpus") + 2
     ]
     assert env["OH_ENABLE_BROWSER"] == browser
+
+
+_ISOLATIONS = [
+    {"name": "sysbox", "runtime": "sysbox-runc"},
+    {
+        "name": "vm",
+        "runtime": "kata",
+        "extra_args": ["--init", "--cap-add", "ALL"],
+        "image": "agent-pc:vm",
+    },
+]
+
+
+def _build_isolated(tmp_path, monkeypatch, options, **config):
+    runtime = registry(
+        tmp_path, monkeypatch, conversation_container_isolations=_ISOLATIONS, **config
+    )
+    conversation_id = uuid4()
+    identity = runtime.provisioning.create(conversation_id)
+    runtime.provisioning.save(identity.model_copy(update={"container": options}))
+    _, command, _ = _build_container(runtime, monkeypatch, conversation_id)
+    return runtime, command
+
+
+def test_standard_isolation_stays_hardened_when_others_are_configured(
+    tmp_path, monkeypatch
+):
+    runtime, command = _build_isolated(tmp_path, monkeypatch, None)
+
+    assert "--runtime" not in command
+    assert "--cap-drop" in command
+    assert "no-new-privileges" in command
+    assert runtime.config.conversation_image in command
+
+
+def test_isolating_runtime_replaces_the_default_hardening(tmp_path, monkeypatch):
+    _, command = _build_isolated(
+        tmp_path, monkeypatch, ConversationContainerOptions(isolation="sysbox")
+    )
+
+    assert ["--runtime", "sysbox-runc"] == command[
+        command.index("--runtime") : command.index("--runtime") + 2
+    ]
+    assert "--cap-drop" not in command
+    assert "no-new-privileges" not in command
+    # Still the agent's own user: root is reached with sudo inside the boundary.
+    assert command[command.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
+
+
+def test_isolation_extra_args_and_image_reach_the_command(tmp_path, monkeypatch):
+    runtime, command = _build_isolated(
+        tmp_path, monkeypatch, ConversationContainerOptions(isolation="vm")
+    )
+
+    start = command.index("--runtime")
+    assert command[start : start + 5] == [
+        "--runtime",
+        "kata",
+        "--init",
+        "--cap-add",
+        "ALL",
+    ]
+    assert "agent-pc:vm" in command
+    assert runtime.config.conversation_image not in command
+
+
+def test_server_default_isolation_applies_when_the_request_names_none(
+    tmp_path, monkeypatch
+):
+    _, command = _build_isolated(
+        tmp_path, monkeypatch, None, conversation_container_isolation="sysbox"
+    )
+
+    assert "sysbox-runc" in command
+    assert "--cap-drop" not in command
+
+
+def test_request_can_pick_standard_over_an_isolating_server_default(
+    tmp_path, monkeypatch
+):
+    _, command = _build_isolated(
+        tmp_path,
+        monkeypatch,
+        ConversationContainerOptions(isolation="standard"),
+        conversation_container_isolation="sysbox",
+    )
+
+    assert "--runtime" not in command
+    assert "--cap-drop" in command
+
+
+def test_stored_isolation_missing_from_config_fails_instead_of_downgrading(
+    tmp_path, monkeypatch
+):
+    with pytest.raises(RuntimeError, match="'gone' is not configured"):
+        _build_isolated(
+            tmp_path, monkeypatch, ConversationContainerOptions(isolation="gone")
+        )
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {
+            "conversation_container_isolations": [
+                {"name": "standard", "runtime": "runc"}
+            ]
+        },
+        {
+            "conversation_container_isolations": [
+                {"name": "vm", "runtime": "kata"},
+                {"name": "vm", "runtime": "runc"},
+            ]
+        },
+        {"conversation_container_isolation": "sysbox"},
+    ],
+)
+def test_config_rejects_inconsistent_isolations(config):
+    with pytest.raises(ValueError, match="conversation_container_isolation"):
+        Config(secret_key=SecretStr("key"), **config)
+
+
+def test_isolations_load_from_the_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv(
+        "OH_CONVERSATION_CONTAINER_ISOLATIONS",
+        json.dumps([{"name": "vm", "runtime": "kata", "extra_args": ["--init"]}]),
+    )
+    monkeypatch.setenv("OH_CONVERSATION_CONTAINER_ISOLATION", "vm")
+    monkeypatch.setenv("OH_SECRET_KEY", "key")
+
+    config = load_config(tmp_path / "missing.json")
+
+    assert config.container_isolation_names() == ["standard", "vm"]
+    assert config.conversation_container_isolation == "vm"
+    isolation = config.container_isolation("vm")
+    assert isolation is not None and isolation.extra_args == ["--init"]

@@ -316,6 +316,12 @@ async def _prepare_forward(
             cipher_context(config.cipher) if body.get("secrets_encrypted") else None
         ),
     )
+    isolation = start.container.isolation if start.container else None
+    if isolation is not None and isolation not in config.container_isolation_names():
+        raise Unprocessable(
+            f"Container isolation {isolation!r} is not offered by this server; "
+            f"available: {', '.join(config.container_isolation_names())}"
+        )
     try:
         settings = await run_store(registry.stores.settings.load)
     except (OSError, PermissionError):

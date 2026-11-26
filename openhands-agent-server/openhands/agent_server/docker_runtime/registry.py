@@ -17,7 +17,11 @@ from urllib.error import URLError
 from urllib.request import urlopen
 from uuid import UUID, uuid4
 
-from openhands.agent_server.config import V1_SESSION_API_KEY_ENV, Config
+from openhands.agent_server.config import (
+    STANDARD_CONTAINER_ISOLATION,
+    V1_SESSION_API_KEY_ENV,
+    Config,
+)
 from openhands.agent_server.conversation_registry import ConversationRegistry
 from openhands.agent_server.docker_runtime.provisioning import RuntimeProvisioningStore
 from openhands.agent_server.docker_runtime.storage import DockerRuntimeStorage
@@ -736,6 +740,30 @@ class DockerConversationRegistry(ConversationRegistry):
                 ("--pids-limit", str(self.config.conversation_container_pids_limit))
             )
 
+        isolation_name = (
+            options.isolation or self.config.conversation_container_isolation
+        )
+        if isolation_name == STANDARD_CONTAINER_ISOLATION:
+            isolation = None
+        else:
+            isolation = self.config.container_isolation(isolation_name)
+            if isolation is None:
+                # Stored with the conversation, so it can outlive the config.
+                raise RuntimeError(
+                    f"Container isolation {isolation_name!r} is not configured "
+                    "on this server"
+                )
+        # The standard container is hardened here; an isolating runtime brings
+        # its own boundary and needs these off for sudo and nested containers.
+        isolation_flags: tuple[str, ...] = (
+            ("--runtime", isolation.runtime, *isolation.extra_args)
+            if isolation is not None
+            else ("--cap-drop", "ALL", "--security-opt", "no-new-privileges")
+        )
+        image = (
+            isolation.image if isolation is not None and isolation.image else None
+        ) or self.config.conversation_image
+
         command = [
             "docker",
             "run",
@@ -743,10 +771,7 @@ class DockerConversationRegistry(ConversationRegistry):
             "--rm",
             "--user",
             f"{os.getuid()}:{os.getgid()}",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
+            *isolation_flags,
             # Core dumps land in the bind-mounted workspace at 1-2 GB each.
             "--ulimit",
             "core=0",
@@ -759,7 +784,7 @@ class DockerConversationRegistry(ConversationRegistry):
             "-p",
             "127.0.0.1::8000",
             *flags,
-            self.config.conversation_image,
+            image,
             "--host",
             "0.0.0.0",
             "--port",

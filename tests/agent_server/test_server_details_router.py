@@ -193,3 +193,16 @@ def test_server_info_advertises_tool_catalog_and_draft_materialize(client):
     capabilities = client.get("/server_info").json()["capabilities"]
     assert "tool_catalog_v1" in capabilities
     assert "agent_profile_draft_materialize_v1" in capabilities
+
+
+def test_server_info_lists_container_isolations():
+    info = sdr.build_server_info()
+    assert info.container_isolation == "standard"
+    assert info.available_container_isolations == ["standard"]
+
+    info = sdr.build_server_info(
+        container_isolation="vm",
+        available_container_isolations=["standard", "sysbox", "vm"],
+    )
+    assert info.container_isolation == "vm"
+    assert info.available_container_isolations == ["standard", "sysbox", "vm"]

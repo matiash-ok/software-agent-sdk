@@ -74,6 +74,21 @@ class ServerInfo(BaseModel):
             "Empty means only `conversation_runtime` is served."
         ),
     )
+    container_isolation: str = Field(
+        default="standard",
+        description=(
+            "Isolation of a Docker-runtime conversation whose start request "
+            "names none in `container.isolation`."
+        ),
+    )
+    available_container_isolations: list[str] = Field(
+        default_factory=lambda: ["standard"],
+        description=(
+            "Isolations a start request may select with `container.isolation` "
+            "for a Docker-runtime conversation. `standard` is the hardened "
+            "container; any other lets the agent run its own Docker daemon."
+        ),
+    )
     capabilities: list[str] = Field(
         default_factory=lambda: [
             "conversation_runtime_routes_v1",
@@ -168,6 +183,8 @@ def build_server_info(
     app_backend_ingress_url: str | None = None,
     conversation_runtime_selectable: bool = False,
     browser_available: bool | None = None,
+    container_isolation: str = "standard",
+    available_container_isolations: list[str] | None = None,
 ) -> ServerInfo:
     """Build the server info; ``browser_available`` None probes this process."""
     now = time.time()
@@ -180,6 +197,8 @@ def build_server_info(
         ),
         app_backend_ingress_url=app_backend_ingress_url,
         usable_tools=_usable_tools(browser_available),
+        container_isolation=container_isolation,
+        available_container_isolations=(available_container_isolations or ["standard"]),
     )
     info.capabilities.append("canvas_app_backend_secret_grants_v1")
     info.capabilities.append("canvas_app_backend_enable_lifecycle_v1")
@@ -198,4 +217,6 @@ async def get_server_info(
         app_backend_ingress_url=config.app_backend_public_url,
         conversation_runtime_selectable=config.conversation_runtime_selectable,
         browser_available=configured_browser_available(config),
+        container_isolation=config.conversation_container_isolation,
+        available_container_isolations=config.container_isolation_names(),
     )

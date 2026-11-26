@@ -194,6 +194,19 @@ class ConversationContainerOptions(BaseModel):
             "without one."
         ),
     )
+    isolation: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z0-9][a-z0-9_-]*$",
+        description=(
+            "Name of the isolation the container runs with: `standard` (the "
+            "hardened default container) or one the server lists in "
+            "`available_container_isolations`, such as a container that can "
+            "run its own Docker daemon or a micro-VM. Unset uses the server's "
+            "`conversation_container_isolation`."
+        ),
+    )
 
 
 class ConversationWorktreeOptions(BaseModel):

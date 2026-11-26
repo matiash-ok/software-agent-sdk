@@ -237,6 +237,50 @@ class TelemetrySpec(BaseModel):
     )
 
 
+STANDARD_CONTAINER_ISOLATION = "standard"
+
+
+class ConversationContainerIsolation(BaseModel):
+    """One way to isolate a conversation's container beyond the default.
+
+    The default (``standard``) container runs with every capability dropped
+    and ``no-new-privileges``, so the agent cannot become root or start a
+    Docker daemon. An isolation defined here hands the boundary to an OCI
+    runtime that provides its own (a user-namespace runtime such as Sysbox, or
+    a micro-VM runtime such as Kata Containers) and leaves that hardening off,
+    which is what lets the agent use sudo and run nested containers. Only
+    define one for a runtime that really isolates: with plain ``runc`` it
+    would give the agent root-equivalent access to the host.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z0-9][a-z0-9_-]*$",
+        description="Name a start request selects it by in `container.isolation`.",
+    )
+    runtime: str = Field(
+        min_length=1,
+        description="OCI runtime passed to `docker run --runtime`.",
+    )
+    extra_args: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Further `docker run` arguments this runtime needs, placed before "
+            "the image (for example `--cap-add ALL` inside a micro-VM)."
+        ),
+    )
+    image: str | None = Field(
+        default=None,
+        description=(
+            "Image for containers with this isolation; unset uses "
+            "`conversation_image`. It must contain the agent server."
+        ),
+    )
+
+
 class Config(BaseModel):
     """
     Immutable configuration for a server running in local mode.
@@ -430,6 +474,27 @@ class Config(BaseModel):
             "launches leave it out even where chromium is available."
         ),
     )
+    conversation_container_isolations: list[ConversationContainerIsolation] = Field(
+        default_factory=list,
+        description=(
+            "Extra ways to isolate a conversation's container that a start "
+            "request may pick by name with `container.isolation`. `standard`, "
+            "the hardened default container, always exists and cannot be "
+            "redefined. Each entry names an OCI runtime installed in Docker "
+            "(for example `sysbox-runc` or `kata`) whose own boundary replaces "
+            "the default hardening, so the agent may use sudo and run a Docker "
+            "daemon of its own. Configure with "
+            "OH_CONVERSATION_CONTAINER_ISOLATIONS as a JSON list."
+        ),
+    )
+    conversation_container_isolation: str = Field(
+        default=STANDARD_CONTAINER_ISOLATION,
+        description=(
+            "Isolation used by a conversation container whose start request "
+            "names none: `standard` or a key of "
+            "`conversation_container_isolations`."
+        ),
+    )
     conversation_container_memory: str | None = "4g"
     conversation_container_cpus: float | None = Field(default=2.0, gt=0)
     conversation_container_pids_limit: int | None = Field(default=512, gt=0)
@@ -532,6 +597,42 @@ class Config(BaseModel):
     )
     model_config: ClassVar[ConfigDict] = {"frozen": True}
     _secret_key_was_blank: bool = PrivateAttr(default=False)
+
+    @model_validator(mode="after")
+    def _check_container_isolations(self) -> Self:
+        names = [item.name for item in self.conversation_container_isolations]
+        if STANDARD_CONTAINER_ISOLATION in names:
+            raise ValueError(
+                f"conversation_container_isolations cannot redefine "
+                f"{STANDARD_CONTAINER_ISOLATION!r}"
+            )
+        if len(set(names)) != len(names):
+            raise ValueError("conversation_container_isolations has duplicate names")
+        default = self.conversation_container_isolation
+        if default != STANDARD_CONTAINER_ISOLATION and default not in names:
+            raise ValueError(
+                f"conversation_container_isolation {default!r} is not defined in "
+                "conversation_container_isolations"
+            )
+        return self
+
+    def container_isolation_names(self) -> list[str]:
+        """Isolations a start request may name, `standard` first."""
+        return [
+            STANDARD_CONTAINER_ISOLATION,
+            *(item.name for item in self.conversation_container_isolations),
+        ]
+
+    def container_isolation(self, name: str) -> ConversationContainerIsolation | None:
+        """The configured isolation called ``name``; None for unknown names."""
+        return next(
+            (
+                item
+                for item in self.conversation_container_isolations
+                if item.name == name
+            ),
+            None,
+        )
 
     @field_validator("session_api_keys")
     @classmethod

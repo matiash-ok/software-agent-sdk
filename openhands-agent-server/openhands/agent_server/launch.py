@@ -255,6 +255,10 @@ def forward_to_runtime(
         context=cipher_context(cipher),
         exclude=sources if source is not None else {"agent", "agent_settings"},
     )
+    # The isolation was applied by this host when it created the container; the
+    # server inside may be a release without the field and would reject it.
+    if isinstance(payload.get("container"), dict):
+        payload["container"].pop("isolation", None)
     if source is None:
         return payload
     model = source.settings if isinstance(source, ResolvedLaunch) else source

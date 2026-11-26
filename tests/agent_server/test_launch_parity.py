@@ -393,3 +393,20 @@ def test_a_docker_host_preview_matches_what_the_container_launches(
     assert ("browser_tool_set" in launched_tools[0]) is image_has_browser
     assert agent.agent_context is not None
     assert preview.resolved_skills == [s.name for s in agent.agent_context.skills]
+
+
+def test_forwarded_request_leaves_out_the_container_isolation():
+    request = StartConversationRequest.model_validate(
+        {
+            "agent_profile_id": "00000000-0000-0000-0000-000000000001",
+            "workspace": {"working_dir": "/workspace"},
+            "container": {"memory": "4g", "isolation": "vm"},
+        }
+    )
+
+    payload = forward_to_runtime(
+        request, None, {}, Cipher("container-key"), load_memory=False
+    )
+
+    assert payload["container"]["memory"] == "4g"
+    assert "isolation" not in payload["container"]
